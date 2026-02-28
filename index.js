@@ -7,8 +7,10 @@ const client = new Client({
 });
 
 const DATA_FILE = './data.json';
+const PREDICTION_CHANNEL = "1477189198120489130"; // LOCKED CHANNEL
+const ADMIN_ROLE_NAME = "Match Admin";
 
-/* ---------- Create data file if missing ---------- */
+/* ---------- Ensure Data File Exists ---------- */
 if (!fs.existsSync(DATA_FILE)) {
     fs.writeFileSync(DATA_FILE, JSON.stringify({
         matches: [],
@@ -26,7 +28,7 @@ function saveData(data) {
 }
 
 /* ---------- Recalculate Leaderboard ---------- */
-function recalculateLeaderboard(data) {
+function recalcLeaderboard(data) {
     data.leaderboard = {};
 
     data.matches.forEach(match => {
@@ -39,15 +41,12 @@ function recalculateLeaderboard(data) {
             const [ph, pa] = preds[userId].split('-').map(Number);
             let points = 0;
 
-            if (ph === home && pa === away) {
-                points = 3;
-            } else if (
+            if (ph === home && pa === away) points = 3;
+            else if (
                 (ph > pa && home > away) ||
                 (ph < pa && home < away) ||
                 (ph === pa && home === away)
-            ) {
-                points = 1;
-            }
+            ) points = 1;
 
             data.leaderboard[userId] = (data.leaderboard[userId] || 0) + points;
         }
@@ -59,8 +58,8 @@ const commands = [
     new SlashCommandBuilder()
         .setName('addmatch')
         .setDescription('Add match (Admin)')
-        .addStringOption(o => o.setName('teams').setDescription('Team A vs Team B').setRequired(true))
-        .addStringOption(o => o.setName('league').setDescription('League name').setRequired(true))
+        .addStringOption(o => o.setName('teams').setRequired(true))
+        .addStringOption(o => o.setName('league').setRequired(true))
         .addStringOption(o => o.setName('time').setDescription('YYYY-MM-DD HH:MM').setRequired(true)),
 
     new SlashCommandBuilder()
@@ -78,19 +77,13 @@ const commands = [
 
     new SlashCommandBuilder()
         .setName('predict')
-        .setDescription('Predict match')
-        .addIntegerOption(o => o.setName('matchid').setRequired(true))
-        .addStringOption(o => o.setName('score').setDescription('Example: 2-1').setRequired(true)),
-
-    new SlashCommandBuilder()
-        .setName('setresult')
-        .setDescription('Set result (Admin)')
+        .setDescription('Predict score')
         .addIntegerOption(o => o.setName('matchid').setRequired(true))
         .addStringOption(o => o.setName('score').setRequired(true)),
 
     new SlashCommandBuilder()
-        .setName('editresult')
-        .setDescription('Edit result (Admin)')
+        .setName('setresult')
+        .setDescription('Set result (Admin)')
         .addIntegerOption(o => o.setName('matchid').setRequired(true))
         .addStringOption(o => o.setName('score').setRequired(true)),
 
@@ -118,12 +111,15 @@ client.once('ready', async () => {
     console.log("Bot Ready");
 });
 
-/* ---------- Interaction Handler ---------- */
+/* ---------- Interaction ---------- */
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
+    if (interaction.channelId !== PREDICTION_CHANNEL)
+        return interaction.reply({ content: `Use this in <#${PREDICTION_CHANNEL}>`, ephemeral: true });
+
     const data = loadData();
-    const adminRole = interaction.guild.roles.cache.find(r => r.name === "Match Admin");
+    const adminRole = interaction.guild.roles.cache.find(r => r.name === ADMIN_ROLE_NAME);
     const isAdmin = adminRole && interaction.member.roles.cache.has(adminRole.id);
 
     /* ADD MATCH */
@@ -143,45 +139,14 @@ client.on('interactionCreate', async interaction => {
 
         data.matches.push(match);
         saveData(data);
-
-        return interaction.reply(`Match added with ID: ${match.id}`);
-    }
-
-    /* EDIT MATCH */
-    if (interaction.commandName === 'editmatch') {
-        if (!isAdmin) return interaction.reply({ content: "No permission.", ephemeral: true });
-
-        const match = data.matches.find(m => m.id === interaction.options.getInteger('matchid'));
-        if (!match) return interaction.reply("Match not found.");
-
-        if (interaction.options.getString('teams')) match.teams = interaction.options.getString('teams');
-        if (interaction.options.getString('league')) match.league = interaction.options.getString('league');
-        if (interaction.options.getString('time')) match.time = new Date(interaction.options.getString('time')).getTime();
-
-        saveData(data);
-        return interaction.reply("Match updated.");
-    }
-
-    /* DELETE MATCH */
-    if (interaction.commandName === 'deletematch') {
-        if (!isAdmin) return interaction.reply({ content: "No permission.", ephemeral: true });
-
-        const id = interaction.options.getInteger('matchid');
-
-        data.matches = data.matches.filter(m => m.id !== id);
-        delete data.predictions[id];
-
-        recalculateLeaderboard(data);
-        saveData(data);
-
-        return interaction.reply("Match deleted and leaderboard updated.");
+        return interaction.reply(`Match added. ID: ${match.id}`);
     }
 
     /* PREDICT */
     if (interaction.commandName === 'predict') {
         const match = data.matches.find(m => m.id === interaction.options.getInteger('matchid'));
         if (!match) return interaction.reply("Match not found.");
-        if (match.result) return interaction.reply("Match already finished.");
+        if (match.result) return interaction.reply("Match finished.");
 
         if (Date.now() > match.time - 10 * 60 * 1000)
             return interaction.reply("Prediction closed (10 mins before match).");
@@ -193,7 +158,6 @@ client.on('interactionCreate', async interaction => {
             interaction.options.getString('score');
 
         saveData(data);
-
         return interaction.reply("Prediction saved.");
     }
 
@@ -205,8 +169,7 @@ client.on('interactionCreate', async interaction => {
         if (!match) return interaction.reply("Match not found.");
 
         match.result = interaction.options.getString('score');
-
-        recalculateLeaderboard(data);
+        recalcLeaderboard(data);
         saveData(data);
 
         const sorted = Object.entries(data.leaderboard)
@@ -220,72 +183,45 @@ client.on('interactionCreate', async interaction => {
             .setTitle("🏆 Leaderboard Updated")
             .setDescription(desc || "No predictions yet.");
 
-        return interaction.reply({ content: "Result set!", embeds: [embed] });
+        return interaction.reply({ embeds: [embed] });
     }
 
-    /* EDIT RESULT */
-    if (interaction.commandName === 'editresult') {
-        if (!isAdmin) return interaction.reply({ content: "No permission.", ephemeral: true });
-
-        const match = data.matches.find(m => m.id === interaction.options.getInteger('matchid'));
-        if (!match || !match.result)
-            return interaction.reply("Result not set yet.");
-
-        match.result = interaction.options.getString('score');
-
-        recalculateLeaderboard(data);
-        saveData(data);
-
-        return interaction.reply("Result corrected and leaderboard recalculated.");
-    }
-
-    /* MATCH LIST */
+    /* MATCHES */
     if (interaction.commandName === 'matches') {
         const active = data.matches.filter(m => !m.result);
-        if (!active.length)
-            return interaction.reply("No active matches.");
+        if (!active.length) return interaction.reply("No active matches.");
 
         let desc = active.map(m =>
             `ID: ${m.id}\n${m.teams}\nLeague: ${m.league}\nTime: <t:${Math.floor(m.time / 1000)}:F>\n`
         ).join("\n");
 
-        const embed = new EmbedBuilder()
-            .setTitle("⚽ Active Matches")
-            .setDescription(desc);
-
-        return interaction.reply({ embeds: [embed] });
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle("⚽ Active Matches").setDescription(desc)] });
     }
 
     /* LEADERBOARD */
     if (interaction.commandName === 'leaderboard') {
-        recalculateLeaderboard(data);
+        recalcLeaderboard(data);
         saveData(data);
 
         const sorted = Object.entries(data.leaderboard)
             .sort((a, b) => b[1] - a[1]);
 
-        if (!sorted.length)
-            return interaction.reply("No leaderboard data yet.");
+        if (!sorted.length) return interaction.reply("No leaderboard yet.");
 
         let desc = sorted.map((u, i) =>
             `${i + 1}. <@${u[0]}> - ${u[1]} pts`
         ).join("\n");
 
-        const embed = new EmbedBuilder()
-            .setTitle("🏆 Leaderboard")
-            .setDescription(desc);
-
-        return interaction.reply({ embeds: [embed] });
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle("🏆 Leaderboard").setDescription(desc)] });
     }
 
-    /* RESET SEASON */
+    /* RESET */
     if (interaction.commandName === 'resetseason') {
         if (!isAdmin) return interaction.reply({ content: "No permission.", ephemeral: true });
 
         data.matches = [];
         data.predictions = {};
         data.leaderboard = {};
-
         saveData(data);
 
         return interaction.reply("Season reset.");
